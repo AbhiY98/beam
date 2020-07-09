@@ -203,7 +203,7 @@ class ContextualTextIOSource extends FileBasedSource<LineContext> {
         byte currentByte = buffer.byteAt(bytePoistionInBuffer);
         if (hasRFC4180MultiLineColumn) {
           // Check if we are inside an open bracket
-          if (currentByte == '"' && hasRFC4180MultiLineColumn) {
+          if (currentByte == '"') {
             doubleBracketClosed = !doubleBracketClosed;
             stopSearching = doubleBracketClosed;
           }
