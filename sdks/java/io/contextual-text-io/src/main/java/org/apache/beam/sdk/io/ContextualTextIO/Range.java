@@ -21,22 +21,22 @@ import com.google.auto.value.AutoValue;
 
 @AutoValue
 public abstract class Range {
-    public abstract Long getRangeNum();
+  public abstract Long getRangeNum();
 
-    public abstract Long getRangeLineNum();
+  public abstract Long getRangeLineNum();
 
-    public abstract Builder toBuilder();
+  public abstract Builder toBuilder();
 
-    public static Builder newBuilder() {
-        return new AutoValue_Range.Builder();
-    }
+  public static Builder newBuilder() {
+    return new AutoValue_Range.Builder();
+  }
 
-    @AutoValue.Builder
-    public abstract static class Builder {
-        public abstract Builder setRangeLineNum(Long rangeLineNum);
+  @AutoValue.Builder
+  public abstract static class Builder {
+    public abstract Builder setRangeLineNum(Long rangeLineNum);
 
-        public abstract Builder setRangeNum(Long rangeNum);
+    public abstract Builder setRangeNum(Long rangeNum);
 
-        public abstract Range build();
-    }
+    public abstract Range build();
+  }
 }

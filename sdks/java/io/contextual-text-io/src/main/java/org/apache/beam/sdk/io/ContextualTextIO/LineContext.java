@@ -28,30 +28,30 @@ import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
 @DefaultSchema(AutoValueSchema.class)
 @AutoValue
 public abstract class LineContext {
-    public abstract Range getRange();
+  public abstract Range getRange();
 
-    public abstract Long getLineNum();
+  public abstract Long getLineNum();
 
-    public abstract String getLine();
+  public abstract String getLine();
 
-    public abstract Builder toBuilder();
+  public abstract Builder toBuilder();
 
-    public abstract String getFile();
+  public abstract String getFile();
 
-    public static Builder newBuilder() {
-        return new AutoValue_LineContext.Builder();
-    }
+  public static Builder newBuilder() {
+    return new AutoValue_LineContext.Builder();
+  }
 
-    @AutoValue.Builder
-    public abstract static class Builder {
-        public abstract Builder setRange(Range range);
+  @AutoValue.Builder
+  public abstract static class Builder {
+    public abstract Builder setRange(Range range);
 
-        public abstract Builder setLineNum(Long lineNum);
+    public abstract Builder setLineNum(Long lineNum);
 
-        public abstract Builder setLine(String line);
+    public abstract Builder setLine(String line);
 
-        public abstract Builder setFile(String file);
+    public abstract Builder setFile(String file);
 
-        public abstract LineContext build();
-    }
+    public abstract LineContext build();
+  }
 }
