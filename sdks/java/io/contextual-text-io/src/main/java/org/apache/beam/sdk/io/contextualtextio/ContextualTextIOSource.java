@@ -336,7 +336,7 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
       currentValue =
           RecordWithMetadata.newBuilder()
               .setRecordNumInOffset(recordUniqueNum)
-              .setStartingOffset(startingOffset)
+              .setRangeOffset(startingOffset)
               .setRecordOffset(startOfRecord)
               .setRecordNum(recordUniqueNum)
               .setFileName(fileName)
