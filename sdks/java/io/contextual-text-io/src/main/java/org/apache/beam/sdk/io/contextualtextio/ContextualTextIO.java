@@ -18,9 +18,13 @@
 package org.apache.beam.sdk.io.contextualtextio;
 
 import static org.apache.beam.sdk.io.FileIO.ReadMatches.DirectoryTreatment;
+import static org.apache.beam.sdk.values.TypeDescriptors.kvs;
+import static org.apache.beam.sdk.values.TypeDescriptors.longs;
+import static org.apache.beam.sdk.values.TypeDescriptors.strings;
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
 
+import avro.shaded.com.google.common.collect.Iterables;
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -29,7 +33,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.IterableCoder;
+import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.CompressedSource;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileBasedSource;
@@ -42,9 +50,9 @@ import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.StaticValueProvider;
 import org.apache.beam.sdk.schemas.NoSuchSchemaException;
 import org.apache.beam.sdk.schemas.SchemaCoder;
-import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
@@ -354,7 +362,7 @@ public class ContextualTextIO {
     public PCollection<RecordWithMetadata> expand(PBegin input) {
       checkNotNull(
           getFilepattern(), "need to set the filepattern of a ContextualTextIO.Read transform");
-      PCollection<RecordWithMetadata> records = null;
+      PCollection<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> records = null;
       if (getMatchConfiguration().getWatchInterval() == null && !getHintMatchesManyFiles()) {
         records = input.apply("Read", org.apache.beam.sdk.io.Read.from(getSource()));
       } else {
@@ -372,11 +380,6 @@ public class ContextualTextIO {
                 .apply("Via ReadFiles", readFiles().withDelimiter(getDelimiter()));
       }
 
-      // Check if the user decided to opt out of recordNums associated with records
-      if (getWithoutRecordNumMetadata()) {
-        return records;
-      }
-
       // At this point the line number in RecordWithMetadata contains the relative line offset from
       // the
       // beginning of the read range.
@@ -384,12 +387,14 @@ public class ContextualTextIO {
       // To compute the absolute position from the beginning of the input,
       // we group the lines within the same ranges, and evaluate the size of each range.
 
-      PCollection<KV<KV<String, Long>, RecordWithMetadata>> recordsGroupedByFileAndRange =
-          records.apply("AddFileNameAndRange", ParDo.of(new AddFileNameAndRange()));
-
       PCollectionView<Map<KV<String, Long>, Long>> rangeSizes =
-          recordsGroupedByFileAndRange
-              .apply("CountRecordsForEachFileRange", Count.perKey())
+          records
+              .apply(
+                  "CountRecordsForEachFileRange",
+                  MapElements.into(kvs(kvs(strings(), longs()), longs()))
+                      .via(
+                          (record) ->
+                              KV.of(record.getKey(), (long) Iterables.size(record.getValue()))))
               .apply("SizesAsView", View.asMap());
 
       // Get Pipeline to create a dummy PCollection with one element to help compute the lines
@@ -410,7 +415,7 @@ public class ContextualTextIO {
                       .withSideInputs(rangeSizes))
               .apply("NumRecordsBeforeEachRangeAsView", View.asMap());
 
-      return recordsGroupedByFileAndRange.apply(
+      return records.apply(
           "AssignLineNums",
           ParDo.of(new AssignRecordNums(numRecordsBeforeEachRange))
               .withSideInputs(numRecordsBeforeEachRange));
@@ -484,7 +489,7 @@ public class ContextualTextIO {
     }
 
     static class AssignRecordNums
-        extends DoFn<KV<KV<String, Long>, RecordWithMetadata>, RecordWithMetadata> {
+        extends DoFn<KV<KV<String, Long>, Iterable<RecordWithMetadata>>, RecordWithMetadata> {
       PCollectionView<Map<KV<String, Long>, Long>> numRecordsBeforeEachRange;
 
       public AssignRecordNums(
@@ -496,24 +501,27 @@ public class ContextualTextIO {
       public void processElement(ProcessContext p) {
         Long range = p.element().getKey().getValue();
         String file = p.element().getKey().getKey();
-        RecordWithMetadata record = p.element().getValue();
+        Iterable<RecordWithMetadata> records = p.element().getValue();
         Long numRecordsLessThanThisRange =
             p.sideInput(numRecordsBeforeEachRange).get(KV.of(file, range));
-        RecordWithMetadata newLine =
-            RecordWithMetadata.newBuilder()
-                .setRecordValue(record.getRecordValue())
-                .setRecordOffset(record.getRecordOffset())
-                .setRecordNum(record.getRecordNumInOffset() + numRecordsLessThanThisRange)
-                .setFileName(record.getFileName())
-                .setRangeOffset(record.getRangeOffset())
-                .setRecordNumInOffset(record.getRecordNumInOffset())
-                .build();
-        p.output(newLine);
+        records.forEach(
+            (record) -> {
+              RecordWithMetadata newLine =
+                  RecordWithMetadata.newBuilder()
+                      .setRecordValue(record.getRecordValue())
+                      .setRecordOffset(record.getRecordOffset())
+                      .setRecordNum(record.getRecordNumInOffset() + numRecordsLessThanThisRange)
+                      .setFileName(record.getFileName())
+                      .setRangeOffset(record.getRangeOffset())
+                      .setRecordNumInOffset(record.getRecordNumInOffset())
+                      .build();
+              p.output(newLine);
+            });
       }
     }
 
     // Helper to create a source specific to the requested compression type.
-    protected FileBasedSource<RecordWithMetadata> getSource() {
+    protected FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> getSource() {
       return CompressedSource.from(
               new ContextualTextIOSource(
                   getFilepattern(),
@@ -544,7 +552,9 @@ public class ContextualTextIO {
   /** Implementation of {@link #readFiles}. */
   @AutoValue
   public abstract static class ReadFiles
-      extends PTransform<PCollection<FileIO.ReadableFile>, PCollection<RecordWithMetadata>> {
+      extends PTransform<
+          PCollection<FileIO.ReadableFile>,
+          PCollection<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>> {
     abstract long getDesiredBundleSizeBytes();
 
     @SuppressWarnings("mutable") // this returns an array that can be mutated by the caller
@@ -576,19 +586,22 @@ public class ContextualTextIO {
     }
 
     @Override
-    public PCollection<RecordWithMetadata> expand(PCollection<FileIO.ReadableFile> input) {
+    public PCollection<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> expand(
+        PCollection<FileIO.ReadableFile> input) {
       SchemaCoder<RecordWithMetadata> coder = null;
       try {
         coder = input.getPipeline().getSchemaRegistry().getSchemaCoder(RecordWithMetadata.class);
       } catch (NoSuchSchemaException e) {
         LOG.error("No Coder Found for RecordWithMetadata");
       }
+      Coder<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> kvCoder =
+          KvCoder.of(KvCoder.of(StringUtf8Coder.of(), VarLongCoder.of()), IterableCoder.of(coder));
       return input.apply(
           "Read all via FileBasedSource",
           new ReadAllViaFileBasedSource<>(
               getDesiredBundleSizeBytes(),
               new CreateTextSourceFn(getDelimiter(), getHasMultilineCSVRecords()),
-              coder));
+              kvCoder));
     }
 
     @Override
@@ -600,7 +613,8 @@ public class ContextualTextIO {
     }
 
     private static class CreateTextSourceFn
-        implements SerializableFunction<String, FileBasedSource<RecordWithMetadata>> {
+        implements SerializableFunction<
+            String, FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>> {
       private byte[] delimiter;
       private boolean hasMultilineCSVRecords;
 
@@ -610,7 +624,8 @@ public class ContextualTextIO {
       }
 
       @Override
-      public FileBasedSource<RecordWithMetadata> apply(String input) {
+      public FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> apply(
+          String input) {
         return new ContextualTextIOSource(
             StaticValueProvider.of(input),
             EmptyMatchTreatment.DISALLOW,

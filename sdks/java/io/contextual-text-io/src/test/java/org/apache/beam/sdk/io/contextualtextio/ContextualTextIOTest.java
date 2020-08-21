@@ -32,7 +32,6 @@ import static org.apache.beam.sdk.io.Compression.UNCOMPRESSED;
 import static org.apache.beam.sdk.io.Compression.ZIP;
 import static org.apache.beam.sdk.transforms.display.DisplayDataMatchers.hasDisplayItem;
 import static org.apache.beam.sdk.values.TypeDescriptors.strings;
-import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
@@ -60,9 +59,6 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileBasedSource;
-import org.apache.beam.sdk.io.FileIO;
-import org.apache.beam.sdk.io.GenerateSequence;
-import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.fs.EmptyMatchTreatment;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -71,27 +67,18 @@ import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.apache.beam.sdk.testing.UsesUnboundedSplittableParDo;
-import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.ToString;
-import org.apache.beam.sdk.transforms.Watch;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.windowing.AfterPane;
-import org.apache.beam.sdk.transforms.windowing.FixedWindows;
-import org.apache.beam.sdk.transforms.windowing.Repeatedly;
-import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.CoderUtils;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream;
 import org.apache.commons.compress.compressors.deflate.DeflateCompressorOutputStream;
-import org.joda.time.Duration;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -214,16 +201,6 @@ public class ContextualTextIOTest {
                     read.withHasMultilineCSVRecords(true))
                 .apply(
                     "ConvertRecordWithMetadataToString" + "_withRFC4180",
-                    ParDo.of(new ConvertRecordWithMetadataToString())))
-        .containsInAnyOrder(expectedOutput);
-
-    PAssert.that(
-            p.apply("Create_Paths_ReadFiles_" + file, Create.of(file.getPath()))
-                .apply("Match_" + file, FileIO.matchAll())
-                .apply("ReadMatches_" + file, FileIO.readMatches().withCompression(compression))
-                .apply("ReadFiles_" + compression.toString(), ContextualTextIO.readFiles())
-                .apply(
-                    "ConvertRecordWithMetadataToStringWithFileIO",
                     ParDo.of(new ConvertRecordWithMetadataToString())))
         .containsInAnyOrder(expectedOutput);
   }
@@ -360,107 +337,6 @@ public class ContextualTextIOTest {
       File fileWithExtension = writeToFile(lines, tempFolder, fileName, compression);
       assertReadingCompressedFileMatchesExpected(fileWithExtension, AUTO, lines, p);
       p.run();
-    }
-  }
-
-  /** Tests for reading files with various delimiters. */
-  @RunWith(Parameterized.class)
-  public static class ReadWithDelimiterTest {
-    private static final ImmutableList<String> EXPECTED = ImmutableList.of("asdf", "hjkl", "xyz");
-    @Rule public TemporaryFolder tempFolder = new TemporaryFolder();
-
-    @Parameterized.Parameters(name = "{index}: {0}")
-    public static Iterable<Object[]> data() {
-      return ImmutableList.<Object[]>builder()
-          //          .add(new Object[] {"\n\n\n", ImmutableList.of("", "", "")})
-          .add(new Object[] {"asdf\nhjkl\nxyz\n", EXPECTED})
-          .add(new Object[] {"asdf\rhjkl\rxyz\r", EXPECTED})
-          .add(new Object[] {"asdf\r\nhjkl\r\nxyz\r\n", EXPECTED})
-          .add(new Object[] {"asdf\rhjkl\r\nxyz\n", EXPECTED})
-          .add(new Object[] {"asdf\nhjkl\nxyz", EXPECTED})
-          .add(new Object[] {"asdf\rhjkl\rxyz", EXPECTED})
-          .add(new Object[] {"asdf\r\nhjkl\r\nxyz", EXPECTED})
-          .add(new Object[] {"asdf\rhjkl\r\nxyz", EXPECTED})
-          .build();
-    }
-
-    @Parameterized.Parameter(0)
-    public String line;
-
-    @Parameterized.Parameter(1)
-    public ImmutableList<String> expected;
-
-    @Test
-    public void testReadLinesWithDelimiter() throws Exception {
-      runTestReadWithData(line.getBytes(UTF_8), expected);
-    }
-
-    private ContextualTextIOSource prepareSource(byte[] data, boolean hasRFC4180Multiline)
-        throws IOException {
-      return ContextualTextIOTest.prepareSource(tempFolder, data, null, hasRFC4180Multiline);
-    }
-
-    private void runTestReadWithData(byte[] data, List<String> expectedResults) throws Exception {
-      ContextualTextIOSource source = prepareSource(data, false);
-      List<RecordWithMetadata> actual =
-          SourceTestUtils.readFromSource(source, PipelineOptionsFactory.create());
-      List<String> actualOutput = new ArrayList<>();
-      actual.forEach(
-          (RecordWithMetadata L) -> {
-            actualOutput.add(L.getRecordValue());
-          });
-      assertThat(
-          actualOutput,
-          containsInAnyOrder(new ArrayList<>(expectedResults).toArray(new String[0])));
-    }
-  }
-
-  @RunWith(Parameterized.class)
-  public static class ReadWithDelimiterAndRFC4180 {
-    static final ImmutableList<String> EXPECTED = ImmutableList.of("\"asdf\nhjkl\nmnop\"", "xyz");
-    @Rule public TemporaryFolder tempFolder = new TemporaryFolder();
-
-    @Parameterized.Parameters(name = "{index}: {0}")
-    public static Iterable<Object[]> data() {
-      return ImmutableList.<Object[]>builder()
-          .add(new Object[] {"\n\n\n", ImmutableList.of("", "", "")})
-          .add(new Object[] {"\"asdf\nhjkl\"\nxyz\n", ImmutableList.of("\"asdf\nhjkl\"", "xyz")})
-          .add(new Object[] {"\"asdf\nhjkl\nmnop\"\nxyz\n", EXPECTED})
-          .add(new Object[] {"\"asdf\nhjkl\nmnop\"\nxyz\r", EXPECTED})
-          .add(new Object[] {"\"asdf\nhjkl\nmnop\"\r\nxyz\n", EXPECTED})
-          .add(new Object[] {"\"asdf\nhjkl\nmnop\"\r\nxyz\r\n", EXPECTED})
-          .add(new Object[] {"\"asdf\nhjkl\nmnop\"\rxyz\r\n", EXPECTED})
-          .build();
-    }
-
-    @Parameterized.Parameter(0)
-    public String line;
-
-    @Parameterized.Parameter(1)
-    public ImmutableList<String> expected;
-
-    @Test
-    public void testReadLinesWithDelimiter() throws Exception {
-      runTestReadWithData(line.getBytes(UTF_8), expected);
-    }
-
-    private ContextualTextIOSource prepareSource(byte[] data, boolean hasRFC4180Multiline)
-        throws IOException {
-      return ContextualTextIOTest.prepareSource(tempFolder, data, null, hasRFC4180Multiline);
-    }
-
-    private void runTestReadWithData(byte[] data, List<String> expectedResults) throws Exception {
-      ContextualTextIOSource source = prepareSource(data, true);
-      List<RecordWithMetadata> actual =
-          SourceTestUtils.readFromSource(source, PipelineOptionsFactory.create());
-      List<String> actualOutput = new ArrayList<>();
-      actual.forEach(
-          (RecordWithMetadata L) -> {
-            actualOutput.add(L.getRecordValue());
-          });
-      assertThat(
-          actualOutput,
-          containsInAnyOrder(new ArrayList<>(expectedResults).toArray(new String[0])));
     }
   }
 
@@ -1053,7 +929,7 @@ public class ContextualTextIOTest {
 
     @Test
     public void testProgressEmptyFile() throws IOException {
-      try (BoundedSource.BoundedReader<RecordWithMetadata> reader =
+      try (BoundedSource.BoundedReader<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> reader =
           prepareSource(new byte[0]).createReader(PipelineOptionsFactory.create())) {
         // Check preconditions before starting.
         assertEquals(0.0, reader.getFractionConsumed(), 1e-6);
@@ -1074,7 +950,7 @@ public class ContextualTextIOTest {
     @Test
     public void testProgressTextFile() throws IOException {
       String file = "line1\nline2\nline3";
-      try (BoundedSource.BoundedReader<RecordWithMetadata> reader =
+      try (BoundedSource.BoundedReader<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> reader =
           prepareSource(file.getBytes(Charsets.UTF_8))
               .createReader(PipelineOptionsFactory.create())) {
         // Check preconditions before starting
@@ -1111,12 +987,13 @@ public class ContextualTextIOTest {
     @Test
     public void testProgressAfterSplitting() throws IOException {
       String file = "line1\nline2\nline3";
-      BoundedSource<RecordWithMetadata> source = prepareSource(file.getBytes(Charsets.UTF_8));
-      BoundedSource<RecordWithMetadata> remainder;
+      BoundedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> source =
+          prepareSource(file.getBytes(Charsets.UTF_8));
+      BoundedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> remainder;
 
       // Create the remainder, verifying properties pre- and post-splitting.
-      try (BoundedSource.BoundedReader<RecordWithMetadata> readerOrig =
-          source.createReader(PipelineOptionsFactory.create())) {
+      try (BoundedSource.BoundedReader<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>
+          readerOrig = source.createReader(PipelineOptionsFactory.create())) {
         // Preconditions.
         assertEquals(0.0, readerOrig.getFractionConsumed(), 1e-6);
         assertEquals(0, readerOrig.getSplitPointsConsumed());
@@ -1146,7 +1023,7 @@ public class ContextualTextIOTest {
       }
 
       // Check the properties of the remainder.
-      try (BoundedSource.BoundedReader<RecordWithMetadata> reader =
+      try (BoundedSource.BoundedReader<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> reader =
           remainder.createReader(PipelineOptionsFactory.create())) {
         // Preconditions.
         assertEquals(0.0, reader.getFractionConsumed(), 1e-6);
@@ -1181,9 +1058,9 @@ public class ContextualTextIOTest {
       // Sanity check: file is at least 2 bundles long.
       assertThat(largeGz.length(), greaterThan(2 * desiredBundleSize));
 
-      FileBasedSource<RecordWithMetadata> source =
+      FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> source =
           ContextualTextIO.read().from(largeGz.getPath()).getSource();
-      List<? extends FileBasedSource<RecordWithMetadata>> splits =
+      List<? extends FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>> splits =
           source.split(desiredBundleSize, options);
 
       // Exactly 1 split, even in AUTO mode, since it is a gzip file.
@@ -1199,69 +1076,14 @@ public class ContextualTextIOTest {
       // Sanity check: file is at least 2 bundles long.
       assertThat(largeTxt.length(), greaterThan(2 * desiredBundleSize));
 
-      FileBasedSource<RecordWithMetadata> source =
+      FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> source =
           ContextualTextIO.read().from(largeTxt.getPath()).withCompression(GZIP).getSource();
-      List<? extends FileBasedSource<RecordWithMetadata>> splits =
+      List<? extends FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>> splits =
           source.split(desiredBundleSize, options);
 
       // Exactly 1 split, even though splittable text file, since using GZIP mode.
       assertThat(splits, hasSize(equalTo(1)));
       SourceTestUtils.assertSourcesEqualReferenceSource(source, splits, options);
-    }
-
-    @Test
-    @Category(NeedsRunner.class)
-    public void testReadFiles() throws IOException {
-      Path tempFolderPath = tempFolder.getRoot().toPath();
-      writeToFile(TINY, tempFolder, "readAllTiny1.zip", ZIP);
-      writeToFile(TINY, tempFolder, "readAllTiny2.txt", UNCOMPRESSED);
-      writeToFile(LARGE, tempFolder, "readAllLarge1.zip", ZIP);
-      writeToFile(LARGE, tempFolder, "readAllLarge2.txt", UNCOMPRESSED);
-      PCollection<String> lines =
-          p.apply(
-                  Create.of(
-                      tempFolderPath.resolve("readAllTiny*").toString(),
-                      tempFolderPath.resolve("readAllLarge*").toString()))
-              .apply(FileIO.matchAll())
-              .apply(FileIO.readMatches().withCompression(AUTO))
-              .apply(ContextualTextIO.readFiles().withDesiredBundleSizeBytes(10))
-              .apply(MapElements.into(strings()).via((RecordWithMetadata L) -> L.getRecordValue()));
-      PAssert.that(lines).containsInAnyOrder(Iterables.concat(TINY, TINY, LARGE, LARGE));
-      p.run();
-    }
-
-    @Test
-    @Category({NeedsRunner.class, UsesUnboundedSplittableParDo.class})
-    public void testReadWatchForNewFiles() throws IOException, InterruptedException {
-      final Path basePath = tempFolder.getRoot().toPath().resolve("readWatch");
-      basePath.toFile().mkdir();
-
-      p.apply(GenerateSequence.from(0).to(10).withRate(1, Duration.millis(100)))
-          .apply(
-              Window.<Long>into(FixedWindows.of(Duration.millis(150)))
-                  .withAllowedLateness(Duration.ZERO)
-                  .triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1)))
-                  .discardingFiredPanes())
-          .apply(ToString.elements())
-          .apply(
-              TextIO.write()
-                  .to(basePath.resolve("data").toString())
-                  .withNumShards(1)
-                  .withWindowedWrites());
-
-      PCollection<String> lines =
-          p.apply(
-                  FileIO.match()
-                      .filepattern(basePath.resolve("*").toString())
-                      .continuously(
-                          Duration.millis(100),
-                          Watch.Growth.afterTimeSinceNewOutput(Duration.standardSeconds(3))))
-              .apply(FileIO.readMatches())
-              .apply(ContextualTextIO.readFiles())
-              .apply(MapElements.into(strings()).via((RecordWithMetadata L) -> L.getRecordValue()));
-
-      PAssert.that(lines).containsInAnyOrder("0", "1", "2", "3", "4", "5", "6", "7", "8", "9");
-      p.run();
     }
   }
 }

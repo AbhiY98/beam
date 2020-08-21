@@ -21,8 +21,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.SeekableByteChannel;
+import java.util.ArrayList;
 import java.util.NoSuchElementException;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.IterableCoder;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.FileBasedSource;
 import org.apache.beam.sdk.io.fs.EmptyMatchTreatment;
 import org.apache.beam.sdk.io.fs.MatchResult;
@@ -31,6 +36,7 @@ import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.schemas.NoSuchSchemaException;
 import org.apache.beam.sdk.schemas.SchemaCoder;
 import org.apache.beam.sdk.schemas.SchemaRegistry;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
@@ -52,7 +58,8 @@ import org.slf4j.LoggerFactory;
  * representing the beginning of the first record to be decoded.
  */
 @VisibleForTesting
-class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
+class ContextualTextIOSource
+    extends FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> {
   byte[] delimiter;
 
   private final Logger LOG = LoggerFactory.getLogger(ContextualTextIOSource.class);
@@ -93,25 +100,26 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
   }
 
   @Override
-  protected FileBasedSource<RecordWithMetadata> createForSubrangeOfFile(
-      MatchResult.Metadata metadata, long start, long end) {
+  protected FileBasedSource<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>
+      createForSubrangeOfFile(MatchResult.Metadata metadata, long start, long end) {
     return new ContextualTextIOSource(metadata, start, end, delimiter, hasMultilineCSVRecords);
   }
 
   @Override
-  protected FileBasedReader<RecordWithMetadata> createSingleFileReader(PipelineOptions options) {
+  protected FileBasedReader<KV<KV<String, Long>, Iterable<RecordWithMetadata>>>
+      createSingleFileReader(PipelineOptions options) {
     return new MultiLineTextBasedReader(this, delimiter, hasMultilineCSVRecords);
   }
 
   @Override
-  public Coder<RecordWithMetadata> getOutputCoder() {
+  public Coder<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> getOutputCoder() {
     SchemaCoder<RecordWithMetadata> coder = null;
     try {
       coder = SchemaRegistry.createDefault().getSchemaCoder(RecordWithMetadata.class);
     } catch (NoSuchSchemaException e) {
       LOG.error("No Coder Found for RecordWithMetadata");
     }
-    return coder;
+    return KvCoder.of(KvCoder.of(StringUtf8Coder.of(), VarLongCoder.of()), IterableCoder.of(coder));
   }
 
   /**
@@ -121,7 +129,8 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
    * <p>See {@link ContextualTextIOSource } for further details.
    */
   @VisibleForTesting
-  static class MultiLineTextBasedReader extends FileBasedReader<RecordWithMetadata> {
+  static class MultiLineTextBasedReader
+      extends FileBasedReader<KV<KV<String, Long>, Iterable<RecordWithMetadata>>> {
     public static final int READ_BUFFER_SIZE = 8192;
     private static final ByteString UTF8_BOM =
         ByteString.copyFrom(new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
@@ -133,7 +142,10 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
     private volatile long startOfNextRecord;
     private volatile boolean eof;
     private volatile boolean elementIsPresent;
-    private @Nullable RecordWithMetadata currentValue;
+    private volatile boolean elementIsPresentOverall;
+    private volatile boolean firstRead;
+    ArrayList<RecordWithMetadata> records;
+    private @Nullable KV<KV<String, Long>, Iterable<RecordWithMetadata>> currentValue;
     private @Nullable ReadableByteChannel inChannel;
     private byte @Nullable [] delimiter;
 
@@ -146,6 +158,8 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
     private MultiLineTextBasedReader(
         ContextualTextIOSource source, byte[] delimiter, boolean hasMultilineCSVRecords) {
       super(source);
+      firstRead = true;
+      records = new ArrayList<>();
       buffer = ByteString.EMPTY;
       this.delimiter = delimiter;
       this.hasMultilineCSVRecords = hasMultilineCSVRecords;
@@ -154,7 +168,7 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
 
     @Override
     protected long getCurrentOffset() throws NoSuchElementException {
-      if (!elementIsPresent) {
+      if (!elementIsPresentOverall) {
         throw new NoSuchElementException();
       }
       return startOfRecord;
@@ -169,8 +183,9 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
     }
 
     @Override
-    public RecordWithMetadata getCurrent() throws NoSuchElementException {
-      if (!elementIsPresent) {
+    public KV<KV<String, Long>, Iterable<RecordWithMetadata>> getCurrent()
+        throws NoSuchElementException {
+      if (!elementIsPresentOverall) {
         throw new NoSuchElementException();
       }
       return currentValue;
@@ -294,8 +309,7 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
       }
     }
 
-    @Override
-    protected boolean readNextRecord() throws IOException {
+    protected boolean readRecords() throws IOException {
       startOfRecord = startOfNextRecord;
 
       findDelimiterBoundsWithMultiLineCheck();
@@ -309,6 +323,24 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
 
       decodeCurrentElement();
       startOfNextRecord = startOfRecord + endOfDelimiterInBuffer;
+      return true;
+    }
+
+    @Override
+    protected boolean readNextRecord() throws IOException {
+      if (!firstRead) {
+        elementIsPresentOverall = false;
+        return false;
+      }
+      firstRead = false;
+      elementIsPresentOverall = true;
+      while (readRecords()) {}
+      currentValue =
+          KV.of(
+              KV.of(
+                  getCurrentSource().getSingleFileMetadata().resourceId().toString(),
+                  startingOffset),
+              records);
       return true;
     }
 
@@ -333,7 +365,7 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
       // The single filename can be found as:
       // fileName.substring(fileName.lastIndexOf('/') + 1);
 
-      currentValue =
+      records.add(
           RecordWithMetadata.newBuilder()
               .setRecordNumInOffset(recordUniqueNum)
               .setRangeOffset(startingOffset)
@@ -341,7 +373,7 @@ class ContextualTextIOSource extends FileBasedSource<RecordWithMetadata> {
               .setRecordNum(recordUniqueNum)
               .setFileName(fileName)
               .setRecordValue(dataToDecode.toStringUtf8())
-              .build();
+              .build());
 
       elementIsPresent = true;
       buffer = buffer.substring(endOfDelimiterInBuffer);
